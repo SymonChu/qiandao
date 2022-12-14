@@ -7,20 +7,22 @@
 
 import base64
 import hashlib
+import ipaddress
+import re
 import socket
 import struct
-import ipaddress
-import uuid
-import jinja2
-from tornado import gen
-from faker import Faker
-import re
 import urllib
-import config
-from tornado import httpclient
+import uuid
 
-from libs.convert import to_text, to_bytes, to_native
-from libs.mcrypto import passlib_or_crypt
+import jinja2
+from Crypto.Cipher import AES
+from faker import Faker
+from tornado import gen, httpclient
+
+import config
+from libs.convert import to_bytes, to_native, to_text
+from libs.mcrypto import aes_decrypt, aes_encrypt, passlib_or_crypt
+
 from .log import Log
 
 logger_Util = Log('qiandao.Http.Util').getlogger()
@@ -87,6 +89,113 @@ def urlmatch(url):
     match = reobj.search(url)
     return match.group()
 
+def urlMatchWithLimit(url):
+    ip_middle_octet = r"(?:\.(?:1?\d{1,2}|2[0-4]\d|25[0-5]))"
+    ip_last_octet = r"(?:\.(?:0|[1-9]\d?|1\d\d|2[0-4]\d|25[0-5]))"
+
+    reobj = re.compile(  # noqa: W605
+        r"^"
+        # protocol identifier
+        r"(?:(?:https?|ftp)://)"
+        # user:pass authentication
+        r"(?:[-a-z\u00a1-\uffff0-9._~%!$&'()*+,;=:]+"
+        r"(?::[-a-z0-9._~%!$&'()*+,;=:]*)?@)?"
+        r"(?:"
+        r"(?P<private_ip>"
+        # IP address exclusion
+        # private & local networks
+        r"(?:(?:10|127)" + ip_middle_octet + r"{2}" + ip_last_octet + r")|"
+        r"(?:(?:169\.254|192\.168)" + ip_middle_octet + ip_last_octet + r")|"
+        r"(?:172\.(?:1[6-9]|2\d|3[0-1])" + ip_middle_octet + ip_last_octet + r"))"
+        r"|"
+        # private & local hosts
+        r"(?P<private_host>"
+        r"(?:localhost))"
+        r"|"
+        # IP address dotted notation octets
+        # excludes loopback network 0.0.0.0
+        # excludes reserved space >= 224.0.0.0
+        # excludes network & broadcast addresses
+        # (first & last IP address of each class)
+        r"(?P<public_ip>"
+        r"(?:[1-9]\d?|1\d\d|2[01]\d|22[0-3])"
+        r"" + ip_middle_octet + r"{2}"
+        r"" + ip_last_octet + r")"
+        r"|"
+        # IPv6 RegEx from https://stackoverflow.com/a/17871737
+        r"\[("
+        # 1:2:3:4:5:6:7:8
+        r"([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|"
+        # 1::                              1:2:3:4:5:6:7::
+        r"([0-9a-fA-F]{1,4}:){1,7}:|"
+        # 1::8             1:2:3:4:5:6::8  1:2:3:4:5:6::8
+        r"([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|"
+        # 1::7:8           1:2:3:4:5::7:8  1:2:3:4:5::8
+        r"([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|"
+        # 1::6:7:8         1:2:3:4::6:7:8  1:2:3:4::8
+        r"([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|"
+        # 1::5:6:7:8       1:2:3::5:6:7:8  1:2:3::8
+        r"([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|"
+        # 1::4:5:6:7:8     1:2::4:5:6:7:8  1:2::8
+        r"([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|"
+        # 1::3:4:5:6:7:8   1::3:4:5:6:7:8  1::8
+        r"[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|"
+        # ::2:3:4:5:6:7:8  ::2:3:4:5:6:7:8 ::8       ::
+        r":((:[0-9a-fA-F]{1,4}){1,7}|:)|"
+        # fe80::7:8%eth0   fe80::7:8%1
+        # (link-local IPv6 addresses with zone index)
+        r"fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|"
+        r"::(ffff(:0{1,4}){0,1}:){0,1}"
+        r"((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}"
+        # ::255.255.255.255   ::ffff:255.255.255.255  ::ffff:0:255.255.255.255
+        # (IPv4-mapped IPv6 addresses and IPv4-translated addresses)
+        r"(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|"
+        r"([0-9a-fA-F]{1,4}:){1,4}:"
+        r"((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}"
+        # 2001:db8:3:4::192.0.2.33  64:ff9b::192.0.2.33
+        # (IPv4-Embedded IPv6 Address)
+        r"(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])"
+        r")\]|"
+        # host name
+        r"(?:(?:(?:xn--[-]{0,2})|[a-z\u00a1-\uffff\U00010000-\U0010ffff0-9]-?)*"
+        r"[a-z\u00a1-\uffff\U00010000-\U0010ffff0-9]+)"
+        # domain name
+        r"(?:\.(?:(?:xn--[-]{0,2})|[a-z\u00a1-\uffff\U00010000-\U0010ffff0-9]-?)*"
+        r"[a-z\u00a1-\uffff\U00010000-\U0010ffff0-9]+)*"
+        # TLD identifier
+        r"(?:\.(?:(?:xn--[-]{0,2}[a-z\u00a1-\uffff\U00010000-\U0010ffff0-9]{2,})|"
+        r"[a-z\u00a1-\uffff\U00010000-\U0010ffff]{2,}))"
+        r")"
+        # port number
+        r"(?::\d{2,5})?"
+        # resource path
+        r"(?:/[-a-z\u00a1-\uffff\U00010000-\U0010ffff0-9._~%!$&'()*+,;=:@/]*)?"
+        # query string
+        r"(?:\?\S*)?"
+        # fragment
+        r"(?:#\S*)?"
+        r"$",
+        re.UNICODE | re.IGNORECASE
+    )
+    
+    match = reobj.search(url)
+    if match:
+        return match.group()
+    return ''
+
+def domainMatch(domain):
+    reobj = re.compile(
+        r'^(?:[a-zA-Z0-9]'  # First character of the domain
+        r'(?:[a-zA-Z0-9-_]{0,61}[A-Za-z0-9])?\.)'  # Sub domain + hostname
+        r'+[A-Za-z0-9][A-Za-z0-9-_]{0,61}'  # First 61 characters of the gTLD
+        r'[A-Za-z]$'  # Last character of the gTLD
+    )
+    
+    match = reobj.search(domain)
+    if match:
+        return match.group()
+    return ''
+
 def getLocalScheme(scheme):
     if scheme in ['http','https']:
         if config.https:
@@ -95,8 +204,10 @@ def getLocalScheme(scheme):
             return 'http'
     return scheme
 
-import umsgpack
 import functools
+
+import umsgpack
+
 
 def func_cache(f):
     _cache = {}
@@ -113,9 +224,14 @@ def func_cache(f):
 def method_cache(fn):
     @functools.wraps(fn)
     def wrapper(self, *args, **kwargs):
+        tmp = {}
+        for i in kwargs:
+            if i == 'sql_session':
+                continue
+            tmp[i] = kwargs[i]
         if not hasattr(self, '_cache'):
             self._cache = dict()
-        key = umsgpack.packb((args, kwargs))
+        key = umsgpack.packb((args, tmp))
         if key not in self._cache:
             self._cache[key] = fn(self, *args, **kwargs)
         return self._cache[key]
@@ -123,6 +239,7 @@ def method_cache(fn):
     return wrapper
 
 import datetime
+
 
 #full_format=True，的时候是具体时间，full_format=False就是几秒钟几分钟几小时时间格式----此处为模糊时间格式模式
 def format_date(date, gmt_offset=-8*60, relative=True, shorter=False, full_format=True):
@@ -224,7 +341,7 @@ def to_bool(a):
 async def send_mail(to, subject, text=None, html=None, shark=False, _from=u"签到提醒 <noreply@{}>".format(config.mail_domain)):
     if not config.mailgun_key:
         subtype = 'html' if html else 'plain'
-        _send_mail(to, subject, html or text or '', subtype)
+        await _send_mail(to, subject, html or text or '', subtype)
         return
 
     httpclient.AsyncHTTPClient.configure('tornado.curl_httpclient.CurlAsyncHTTPClient')
@@ -253,14 +370,15 @@ async def send_mail(to, subject, text=None, html=None, shark=False, _from=u"签�
         auth_password=config.mailgun_key,
         body=urllib.parse.urlencode(body)
     )
-    res = await gen.convert_yielded(client.fetch(req))
+    res = await client.fetch(req)
     return res
 
 
 import smtplib
 from email.mime.text import MIMEText
 
-def _send_mail(to, subject, text=None, subtype='html'):
+
+async def _send_mail(to, subject, text=None, subtype='html'):
     if not config.mail_smtp:
         logger_Util.info('no smtp')
         return
@@ -281,7 +399,8 @@ def _send_mail(to, subject, text=None, subtype='html'):
 
 
 import chardet
-from requests.utils import get_encoding_from_headers, get_encodings_from_content
+from requests.utils import (get_encoding_from_headers,
+                            get_encodings_from_content)
 
 
 def find_encoding(content, headers=None):
@@ -338,6 +457,7 @@ def quote_chinese(url, encodeing="utf-8"):
 
 
 from hashlib import sha1
+
 try:
     from hashlib import md5 as _md5
 except ImportError:
@@ -358,6 +478,8 @@ def md5string(data):
     return secure_hash_s(data, _md5)
 
 import random
+
+
 def get_random(min_num, max_num, unit):
     random_num = random.uniform(min_num, max_num)
     result = "%.{0}f".format(int(unit)) % random_num
@@ -383,6 +505,8 @@ def randomize_list(mylist, seed=None):
     return mylist
 
 import datetime
+
+
 def get_date_time(date=True, time=True, time_difference=0):
     if isinstance(date,str):
         date=int(date)
@@ -495,6 +619,8 @@ def regex_escape(value, re_type='python'):
         raise Exception('Invalid regex type (%s)' % re_type)
 
 import time
+
+
 def timestamp(type='int'):
     if type=='float':
         return time.time()
@@ -615,6 +741,44 @@ def b64encode(string, encoding='utf-8'):
 def b64decode(string, encoding='utf-8'):
     return to_text(base64.b64decode(to_bytes(string, errors='surrogate_or_strict')), encoding=encoding)
 
+def switch_mode(mode):
+    mode = mode.upper()
+    if mode == 'CBC':
+        return AES.MODE_CBC
+    elif mode == 'ECB':
+        return AES.MODE_ECB
+    elif mode == 'CFB':
+        return AES.MODE_CFB
+    elif mode == 'OFB':
+        return AES.MODE_OFB
+    elif mode == 'CTR':
+        return AES.MODE_CTR
+    elif mode == 'OPENPGP':
+        return AES.MODE_OPENPGP
+    elif mode == 'GCM':
+        return AES.MODE_GCM
+    elif mode == 'CCM':
+        return AES.MODE_CCM
+    elif mode == 'SIV':
+        return AES.MODE_SIV
+    elif mode == 'OCB':
+        return AES.MODE_OCB
+    elif mode == 'EAX':
+        return AES.MODE_EAX
+    else:
+        raise Exception('Invalid AES mode: %s' % mode)
+
+def _aes_encrypt(word:str, key:str, mode='CBC', iv:str=None, output_format='base64', padding=True, padding_style='pkcs7', no_packb=True):
+    if key is None:
+        raise Exception('key is required')
+    mode = switch_mode(mode)
+    return aes_encrypt(word.encode("utf-8"), key.encode("utf-8"), mode=mode, iv=iv.encode("utf-8"), output=output_format, padding=padding, padding_style=padding_style, no_packb=no_packb)
+
+def _aes_decrypt(word:str, key:str, mode='CBC', iv:str=None, input_format='base64', padding=True, padding_style='pkcs7', no_packb=True):
+    if key is None:
+        raise Exception('key is required')
+    mode = switch_mode(mode)
+    return aes_decrypt(word.encode("utf-8"), key.encode("utf-8"), mode=mode, iv=iv.encode("utf-8"), input=input_format, padding=padding, padding_style=padding_style, no_packb=no_packb)
 
 jinja_globals = {
     # types
@@ -645,6 +809,8 @@ jinja_globals = {
     # generic hashing
     'password_hash': get_encrypted_password,
     'hash': get_hash,
+    'aes_encrypt': _aes_encrypt,
+    'aes_decrypt': _aes_decrypt,
     # regex
     'regex_replace': regex_replace,
     'regex_escape': regex_escape,

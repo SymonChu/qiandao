@@ -8,6 +8,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 Nothing right now.
 
+## [20220911] - 2022.09.11 更新
+
+1. 允许用户选择定时任务执行方式
+2. 修复 DIYPusher 的 bug
+3. 其他优化和修复
+
+## [20220901] - 2022.09.01 更新
+
+1. 修复多个数据库转换问题
+2. 修复前端 header 无法勾选的问题
+3. 其他优化和修复
+
+## [20220828] - 2022.08.28 更新
+
+1. 添加多种 jinja2 过滤器并更新关于页面
+2. 添加 Ja3 Dockerfile
+3. 添加 curlToHAR feature close a76yyyy/qiandao#7
+4. 添加 单账号多记事本 feature close qiandao-today/qiandao#154
+5. 添加 SQLAlchemy ORM feature for qiandao-today/qiandao#253
+6. Debug 日志模式记录 Tornado Client 请求
+7. 优化公共模板更新性能, 仅 har version 更新时增量更新 content
+8. 优化定时任务执行性能, 实现生产者-消费者异步队列模型
+9. 其他优化和修复
+
 ## [20220728] - 2022.07.28 更新
 
 1. 增加 if, else endif 关键字支持 (by [aa889788](https://github.com/qiandao-today/qiandao/commits?author=aa889788))

@@ -6,13 +6,16 @@
 # Created on 2014-08-07 21:01:31
 
 import base64
-import umsgpack
-import config
+from binascii import a2b_hex, b2a_hex
 
-from pbkdf2 import PBKDF2
+import umsgpack
 from Crypto import Random
-from Crypto.Hash import SHA256
 from Crypto.Cipher import AES
+from Crypto.Hash import SHA256
+from Crypto.Util.Padding import pad, unpad
+from pbkdf2 import PBKDF2
+
+import config
 
 Crypto_random = Random.new()
 def password_hash(word, salt=None, iterations=config.pbkdf2_iterations):
@@ -27,41 +30,63 @@ def password_hash(word, salt=None, iterations=config.pbkdf2_iterations):
 
     return umsgpack.packb([rawhash, salt, iterations])
 
-def aes_encrypt(word, key=config.aes_key, iv=None):
+def aes_encrypt(word, key=config.aes_key, iv=None, output='base64', padding=True, padding_style='pkcs7', mode=AES.MODE_CBC, no_packb=False):
     if iv is None:
         iv = Crypto_random.read(16)
+        
+    if not no_packb:
+        word = umsgpack.packb(word)
+        
+    if padding:
+        word = pad(word,AES.block_size,padding_style)
 
-    word = umsgpack.packb(word)
-    mod = len(word) % 16
-    if mod != 0:
-        word += b'\0' * (16-mod)
-
-    aes = AES.new(key, AES.MODE_CBC, iv)
+    if mode in [AES.MODE_ECB, AES.MODE_CTR]:
+        aes = AES.new(key, mode)
+    else:
+        aes = AES.new(key, mode, iv)
+    
     ciphertext = aes.encrypt(word)
-
+    if no_packb:
+        output = output.lower()
+        if output == 'base64':
+            return base64.encodebytes(ciphertext).decode('utf-8')
+        elif output == 'hex':
+            return b2a_hex(ciphertext).decode('utf-8')
+        return ciphertext
     return umsgpack.packb([ciphertext, iv])
 
-def aes_decrypt(word, key=config.aes_key, iv=None):
-    if iv is None:
+def aes_decrypt(word, key=config.aes_key, iv=None, input='base64', padding=True, padding_style='pkcs7', mode=AES.MODE_CBC, no_packb=False):
+    if iv is None and not no_packb:
         word, iv = umsgpack.unpackb(word)
-    else:
-        raise Exception('no iv error')
+    
+    if no_packb:
+        input = input.lower()
+        if input == 'base64':
+            word = base64.decodebytes(word)
+        elif input == 'hex':
+            word = a2b_hex(word)
 
-    aes = AES.new(key, AES.MODE_CBC, iv)
+    if mode in [AES.MODE_ECB, AES.MODE_CTR]:
+        aes = AES.new(key, mode)
+    else:
+        aes = AES.new(key, mode, iv)
     word = aes.decrypt(word)
 
-    while word:
-        try:
-            return umsgpack.unpackb(word)
-        except umsgpack.ExtraData:
-            word = word[:-1]
+    if not no_packb:
+        while word:
+            try:
+                return umsgpack.unpackb(word)
+            except umsgpack.ExtraData:
+                word = word[:-1]
+    elif padding:
+        return unpad(word,AES.block_size,padding_style).decode('utf-8')
 
 
-from collections import namedtuple
 import random
 import re
 import string
 import sys
+from collections import namedtuple
 
 from libs.convert import to_bytes, to_text
 

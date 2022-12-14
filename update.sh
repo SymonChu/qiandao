@@ -24,7 +24,7 @@ AUTO_RELOAD=$AUTO_RELOAD
 # Treat unset variables as an error
 set -o nounset
 
-__ScriptVersion="2022.03.06"
+__ScriptVersion="2022.09.11"
 __ScriptName="update.sh"
 
 
@@ -68,10 +68,7 @@ update() {
     remoteversion=$(git ls-remote --tags origin | grep -o 'refs/tags/[0-9]*' | sort -r | head -n 1 | grep -o '[^\/]*$')
     if [ $(echo $localversion $remoteversion | awk '$1>=$2 {print 0} $1<$2 {print 1}') == 1 ];then
         echo -e "Info: 当前版本: $localversion \nInfo: 新版本: $remoteversion \nInfo: 正在更新中, 请稍候..."
-        git fetch --all
-        git reset --hard origin/master
-        git checkout master
-        git pull
+        wget https://gitee.com/a76yyyy/qiandao/raw/$remoteversion/requirements.txt -O /usr/src/app/requirements.txt && \
         [[ -z $(file /bin/busybox | grep -i "musl") ]] && {\
             pip install -r requirements.txt && \
             echo "如需使用DdddOCR API, 请确认安装 ddddocr Python模组 (如未安装, 请成功执行以下命令后重启qiandao); " && \
@@ -85,7 +82,7 @@ update() {
                 apk del .python-rundeps  
                 echo "Info: 如需使用DDDDOCR API, 请重新拉取最新容器 (32位系统暂不支持此API). "
             fi
-            apk add --update --no-cache python3 py3-pip py3-setuptools py3-wheel python3-dev py3-markupsafe py3-pycryptodome py3-tornado py3-wrapt py3-packaging && \
+            apk add --update --no-cache python3 py3-pip py3-setuptools py3-wheel python3-dev py3-markupsafe py3-pycryptodome py3-tornado py3-wrapt py3-packaging py3-greenlet py3-urllib3 py3-cryptography && \
             if [ $(printenv QIANDAO_LITE) ] && [ "$QIANDAO_LITE" = "True" ];then
                 echo "Info: Qiandao-Lite will not install ddddocr related components. "
             else
@@ -108,13 +105,20 @@ update() {
                 sed -i '/pillow/d' requirements.txt 
                 sed -i '/opencv/d' requirements.txt 
                 sed -i '/numpy/d' requirements.txt 
+                sed -i '/greenlet/d' requirements.txt
+                sed -i '/urllib3/d' requirements.txt
+                sed -i '/cryptography/d' requirements.txt
             fi
             pip install --no-cache-dir -r requirements.txt 
             pip install --no-cache-dir --compile --upgrade pycurl 
             apk del .build_deps 
             rm -rf /var/cache/apk/* 
             rm -rf /usr/share/man/*
-        }
+        } && \
+        git fetch --all && \
+        git reset --hard origin/master && \
+        git checkout master && \
+        git pull
     else
         echo "Info: 当前版本: $localversion , 无需更新!"
     fi
@@ -127,10 +131,7 @@ force_update() {
     localversion=$(python -c 'import sys, json; print(json.load(open("version.json"))["version"])')
     remoteversion=$(git ls-remote --tags origin | grep -o 'refs/tags/[0-9]*' | sort -r | head -n 1 | grep -o '[^\/]*$')
     echo -e "Info: 正在强制更新中, 请稍候..."
-    git fetch --all
-    git reset --hard origin/master
-    git checkout master
-    git pull
+    wget https://gitee.com/a76yyyy/qiandao/raw/master/requirements.txt -O /usr/src/app/requirements.txt && \
     [[ -z $(file /bin/busybox | grep -i "musl") ]] && {\
         pip install -r requirements.txt && \
         echo "如需使用DdddOCR API, 请确认安装 ddddocr Python模组 (如未安装, 请成功执行以下命令后重启qiandao); " && \
@@ -144,7 +145,7 @@ force_update() {
             apk del .python-rundeps  
             echo "Info: 如需使用DDDDOCR API, 请重新拉取最新容器 (32位系统暂不支持此API). "
         fi
-        apk add --update --no-cache python3 py3-pip py3-setuptools py3-wheel python3-dev py3-markupsafe py3-pycryptodome py3-tornado py3-wrapt py3-packaging && \
+        apk add --update --no-cache python3 py3-pip py3-setuptools py3-wheel python3-dev py3-markupsafe py3-pycryptodome py3-tornado py3-wrapt py3-packaging py3-greenlet py3-urllib3 py3-cryptography && \
         if [ $(printenv QIANDAO_LITE) ] && [ "$QIANDAO_LITE" = "True" ];then
             echo "Info: Qiandao-Lite will not install ddddocr related components. "
         else
@@ -167,13 +168,20 @@ force_update() {
             sed -i '/pillow/d' requirements.txt 
             sed -i '/opencv/d' requirements.txt 
             sed -i '/numpy/d' requirements.txt 
+            sed -i '/greenlet/d' requirements.txt
+            sed -i '/urllib3/d' requirements.txt
+            sed -i '/cryptography/d' requirements.txt
         fi
         pip install --no-cache-dir -r requirements.txt 
         pip install --no-cache-dir --compile --upgrade pycurl 
         apk del .build_deps 
         rm -rf /var/cache/apk/* 
         rm -rf /usr/share/man/*
-    }
+    } && \
+    git fetch --all && \
+    git reset --hard origin/master && \
+    git checkout master && \
+    git pull
     if [ $(printenv AUTO_RELOAD) ] && [ "$AUTO_RELOAD" == "False" ];then
         echo "Info: 请手动重启容器, 或设置环境变量AUTO_RELOAD以开启热更新功能"
     fi
@@ -181,8 +189,7 @@ force_update() {
 
 update_version() {
     echo -e "Info: 正在强制切换至指定Tag版本: $1, 请稍候..."
-    git fetch --all
-    git checkout -f $1
+    wget https://gitee.com/a76yyyy/qiandao/raw/$1/requirements.txt -O /usr/src/app/requirements.txt && \
     [[ -z $(file /bin/busybox | grep -i "musl") ]] && {\
         pip install -r requirements.txt && \
         echo "如需使用DdddOCR API, 请确认安装 ddddocr Python模组 (如未安装, 请成功执行以下命令后重启qiandao); " && \
@@ -196,7 +203,7 @@ update_version() {
             apk del .python-rundeps  
             echo "Info: 如需使用DDDDOCR API, 请重新拉取最新容器 (32位系统暂不支持此API). "
         fi
-        apk add --update --no-cache python3 py3-pip py3-setuptools py3-wheel python3-dev py3-markupsafe py3-pycryptodome py3-tornado py3-wrapt py3-packaging && \
+        apk add --update --no-cache python3 py3-pip py3-setuptools py3-wheel python3-dev py3-markupsafe py3-pycryptodome py3-tornado py3-wrapt py3-packaging py3-greenlet py3-urllib3 py3-cryptography && \
         if [ $(printenv QIANDAO_LITE) ] && [ "$QIANDAO_LITE" = "True" ];then
             echo "Info: Qiandao-Lite will not install ddddocr related components. "
         else
@@ -219,13 +226,18 @@ update_version() {
             sed -i '/pillow/d' requirements.txt 
             sed -i '/opencv/d' requirements.txt 
             sed -i '/numpy/d' requirements.txt 
+            sed -i '/greenlet/d' requirements.txt
+            sed -i '/urllib3/d' requirements.txt
+            sed -i '/cryptography/d' requirements.txt
         fi
         pip install --no-cache-dir -r requirements.txt 
         pip install --no-cache-dir --compile --upgrade pycurl 
         apk del .build_deps 
         rm -rf /var/cache/apk/* 
         rm -rf /usr/share/man/*
-    }
+    } && \
+    git fetch --all && \
+    git checkout -f $1
     if [ $(printenv AUTO_RELOAD) ] && [ "$AUTO_RELOAD" == "False" ];then
         echo "Info: 请手动重启容器, 或设置环境变量AUTO_RELOAD以开启热更新功能"
     fi

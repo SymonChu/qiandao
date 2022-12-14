@@ -1,14 +1,16 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+import datetime
+import json
 import os
 import re
-import json
-import datetime
 import time
-import urllib
-import pytz
 import traceback
+import urllib
+
+import pytz
+
 from libs.log import Log
 
 logger_Web_Util = Log('qiandao.Web.Util').getlogger()
@@ -17,16 +19,20 @@ try:
 except ImportError as e:
     logger_Web_Util.warning('Import DdddOCR module falied: %s',e)
     ddddocr = None
-import requests
 import asyncio
-import functools
-from .base import *
-from tornado import gen
 import base64
-from Crypto.PublicKey import RSA
-from Crypto.Cipher import  PKCS1_v1_5
+import functools
+
+import requests
 from Crypto import Random
-from config import delay_max_timeout,strtobool
+from Crypto.Cipher import PKCS1_v1_5
+from Crypto.PublicKey import RSA
+from tornado import gen
+
+from config import delay_max_timeout, strtobool
+
+from .base import *
+
 
 def request_parse(req_data):
     '''解析请求数据并以json形式返回'''
@@ -109,7 +115,7 @@ class TimeStampHandler(BaseHandler):
             tmp = datetime.datetime.fromtimestamp
 
             if not ts:
-                # 当前本机时间戳，本机时间和北京时间
+                # 当前本机时间戳, 本机时间和北京时间
                 Rtv[u"完整时间戳"] = time.time()
                 Rtv[u"时间戳"] = int(Rtv[u"完整时间戳"])
                 Rtv[u"16位时间戳"] = int(Rtv[u"完整时间戳"]*1000000)
@@ -396,7 +402,7 @@ class UtilRSAHandler(BaseHandler):
 
 class toolboxHandler(BaseHandler):
     async def get(self, userid):
-        user = self.current_user
+        self.current_user["isadmin"] or self.check_permission({"userid":int(userid)}, 'r')
         await self.render('toolbox.html', userid=userid)
 
     async def post(self, userid):
@@ -405,27 +411,172 @@ class toolboxHandler(BaseHandler):
             pwd = self.get_argument("pwd", "")
             f = self.get_argument("f", "")
             if (email) and (pwd) and (f):
-                if self.db.user.challenge_MD5(email, pwd) or self.db.user.challenge(email, pwd):
-                    userid = self.db.user.get(email=email, fields=('id'))['id']
-                    text_data = self.db.user.get(email=email, fields=('notepad'))['notepad']
-                    new_data = self.get_argument("data", "")
-                    if (f.find('write') > -1 ): 
-                        text_data = new_data
-                        self.db.user.mod(userid, notepad=text_data)
-                    elif (f.find('append') > -1):
-                        if text_data is not None:
-                            text_data = text_data + '\r\n' + new_data
-                        else:
+                async with self.db.transaction() as sql_session:
+                    if await self.db.user.challenge_MD5(email, pwd, sql_session=sql_session) or await self.db.user.challenge(email, pwd, sql_session=sql_session):
+                        notepadid=self.get_argument("id_notepad", 1)
+                        userid = (await self.db.user.get(email=email, fields=('id',), sql_session=sql_session))['id']
+                        text_data = (await self.db.notepad.get(userid, notepadid, fields=('content',), sql_session=sql_session))['content']
+                        new_data = self.get_argument("data", "")
+                        if (f.find('write') > -1 ): 
                             text_data = new_data
-                        self.db.user.mod(userid, notepad=text_data)
-                    self.write(text_data)
-                    return
-                else:
-                    raise Exception(u"账号密码错误")
+                            await self.db.notepad.mod(userid, notepadid, content=text_data, sql_session=sql_session)
+                        elif (f.find('append') > -1):
+                            if text_data is not None:
+                                text_data = text_data + '\r\n' + new_data
+                            else:
+                                text_data = new_data
+                            await self.db.notepad.mod(userid, notepadid, content=text_data, sql_session=sql_session)
+                        self.write(text_data)
+                        return
+                    else:
+                        raise Exception(u"账号密码错误")
             else:
                 raise Exception(u"参数不完整，请确认")
         except Exception as e:
             self.write(str(e))
+            return
+
+class toolbox_notepad_Handler(BaseHandler):
+    @tornado.web.authenticated
+    async def get(self,userid=None,notepadid=1):
+        if userid is None:
+            raise HTTPError(405)
+        self.current_user["isadmin"] or self.check_permission({"userid":int(userid)}, 'r')
+        notepadlist = await self.db.notepad.list(fields=('notepadid','content'), limit=20, userid=userid )
+        notepadlist.sort(key=lambda x:x['notepadid'])
+        if len(notepadlist) == 0:
+            if await self.db.user.get(id=userid, fields=('id',)) is not None:
+                await self.db.notepad.add(dict(userid=userid, notepadid=1))
+                notepadlist = await self.db.notepad.list(fields=('notepadid','content'), limit=20, userid=userid )
+            else:
+                raise HTTPError(404, log_message=u"用户不存在或未创建记事本",reason=u"用户不存在或未创建记事本")
+        if int(notepadid) == 0:
+            notepadid = notepadlist[-1]['notepadid']
+        await self.render('toolbox-notepad.html', notepad_id = int(notepadid), notepad_list=notepadlist, userid=userid)
+        return
+
+    # @tornado.web.authenticated
+    async def post(self,userid=None):
+        try:
+            email = self.get_argument("email", "")
+            pwd = self.get_argument("pwd", "")
+            f = self.get_argument("f", "")
+            if (email) and (pwd) and (f):
+                async with self.db.transaction() as sql_session:
+                    if await self.db.user.challenge_MD5(email, pwd, sql_session=sql_session) or await self.db.user.challenge(email, pwd, sql_session=sql_session):
+                        notepadid = int(self.get_argument("id_notepad", 1))
+                        userid = (await self.db.user.get(email=email, fields=('id',), sql_session=sql_session))['id']
+                        notepad = await self.db.notepad.get(userid, notepadid, fields=('content',), sql_session=sql_session)
+                        if not notepad:
+                            if notepadid == 1:
+                                await self.db.notepad.add(dict(userid=userid, notepadid=notepadid), sql_session=sql_session)
+                            else:
+                                raise Exception(u"记事本不存在")
+                        text_data = notepad['content']
+                        new_data = self.get_argument("data", "")
+                        if (f.find('write') > -1 ): 
+                            text_data = new_data
+                            await self.db.notepad.mod(userid, notepadid, content=text_data, sql_session=sql_session)
+                        elif (f.find('append') > -1):
+                            if text_data is not None:
+                                text_data = text_data + '\r\n' + new_data
+                            else:
+                                text_data = new_data
+                            await self.db.notepad.mod(userid, notepadid, content=text_data, sql_session=sql_session)
+                        self.write(text_data)
+                        return
+                    else:
+                        raise Exception(u"账号密码错误")
+            else:
+                raise Exception(u"参数不完整，请确认")
+        except Exception as e:
+            if config.traceback_print:
+                traceback.print_exc()
+            if (str(e).find('get user need id or email') > -1):
+                e = u'请输入用户名/密码'
+            self.write(str(e))
+            self.set_status(400)
+            logger_Web_Handler.error('UserID: %s modify Notepad_Toolbox failed! Reason: %s', userid or '-1', str(e))
+            return
+
+class toolbox_notepad_list_Handler(BaseHandler):
+    async def get(self,userid=None,notepadid=1):
+        if userid is None:
+            raise HTTPError(405)
+        self.current_user["isadmin"] or self.check_permission({"userid":int(userid)}, 'r')
+        notepadlist = await self.db.notepad.list(fields=('notepadid','content'), limit=20, userid=userid )
+        notepadlist.sort(key=lambda x:x['notepadid'])
+        if len(notepadlist) == 0:
+            if await self.db.user.get(id=userid, fields=('id',)) is not None:
+                await self.db.notepad.add(dict(userid=userid, notepadid=1))
+                notepadlist = await self.db.notepad.list(fields=('notepadid','content'), limit=20, userid=userid )
+            else:
+                raise HTTPError(404, log_message=u"用户不存在或未创建记事本",reason=u"用户不存在或未创建记事本")
+        if int(notepadid) == 0:
+            notepadid = notepadlist[-1]['notepadid']
+        await self.render('toolbox-notepad.html', notepad_id = notepadid, notepad_list=notepadlist, userid=userid)
+        return
+    
+    async def post(self,userid=None):
+        try:
+            email = self.get_argument("email", "")
+            pwd = self.get_argument("pwd", "")
+            f = self.get_argument("f", "list")
+            if (email) and (pwd) and (f):
+                async with self.db.transaction() as sql_session:
+                    if await self.db.user.challenge_MD5(email, pwd, sql_session=sql_session) or await self.db.user.challenge(email, pwd, sql_session=sql_session):
+                        userid = (await self.db.user.get(email=email, fields=('id',), sql_session=sql_session))['id']
+                        notepadid = self.get_argument("id_notepad", "-1")
+                        if not notepadid:
+                            notepadid = -1
+                        else:
+                            notepadid = int(notepadid)
+                        notepadlist = await self.db.notepad.list(fields=('notepadid',), limit=20, userid=userid, sql_session=sql_session )
+                        notepadlist = [x['notepadid'] for x in notepadlist]
+                        notepadlist.sort()
+                        if len(notepadlist) == 0:
+                            raise Exception(u"无法获取该用户记事本编号")
+                        if f.find('add') > -1:
+                            if len(notepadlist) >= 20:
+                                raise Exception(u"记事本数量超过上限, limit: 20")
+                            new_data = self.get_argument("data", '')
+                            if new_data == '':
+                                new_data = None
+                            if notepadid == -1:
+                                notepadid = notepadlist[-1]+1
+                            elif notepadid in notepadlist:
+                                raise Exception(u"记事本编号已存在, id_notepad: %s" % notepadid)
+                            await self.db.notepad.add(dict(userid=userid, notepadid=notepadid, content=new_data), sql_session=sql_session)
+                            self.write(u"添加成功, id_notepad: %s" % (notepadid))
+                            return
+                        elif f.find('delete') > -1:
+                            if notepadid > 0:
+                                if notepadid not in notepadlist:
+                                    raise Exception(u"记事本编号不存在, id_notepad: %s" % notepadid)
+                                if notepadid == 1:
+                                    raise Exception(u"默认记事本不能删除")
+                                await self.db.notepad.delete(userid, notepadid, sql_session=sql_session)
+                                self.write(u"删除成功, id_notepad: %s" % (notepadid))
+                                return
+                            else:
+                                raise Exception(u"id_notepad参数不完整, 请确认")
+                        elif f.find('list') > -1:
+                            self.write(notepadlist)
+                            return
+                        else:
+                            raise Exception(u"参数不完整, 请确认")
+                    else:
+                        raise Exception(u"账号密码错误")
+            else:
+                raise Exception(u"参数不完整, 请确认")
+        except Exception as e:
+            if config.traceback_print:
+                traceback.print_exc()
+            if (str(e).find('get user need id or email') > -1):
+                e = u'请输入用户名/密码'
+            self.write(str(e))
+            self.set_status(400)
+            logger_Web_Handler.error('UserID: %s %s Notepad_Toolbox failed! Reason: %s', userid or '-1', f, str(e))
             return
 
 class DdddOCRServer(object):
@@ -587,6 +738,12 @@ handlers = [
     ('/util/string/replace', UtilStrReplaceHandler),
     ('/util/rsa', UtilRSAHandler),
     ('/util/toolbox/(\d+)', toolboxHandler),
+    ('/util/toolbox/notepad', toolbox_notepad_Handler),
+    ('/util/toolbox/(\d+)/notepad', toolbox_notepad_Handler),
+    ('/util/toolbox/(\d+)/notepad/(\d+)', toolbox_notepad_Handler),
+    ('/util/toolbox/notepad/list', toolbox_notepad_list_Handler),
+    ('/util/toolbox/(\d+)/notepad/list', toolbox_notepad_list_Handler),
+    ('/util/toolbox/(\d+)/notepad/list/(\d+)', toolbox_notepad_list_Handler),
     ('/util/dddd/ocr', DdddOcrHandler),
     ('/util/dddd/det', DdddDetHandler),
 ]

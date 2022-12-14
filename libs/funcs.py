@@ -2,30 +2,35 @@
 # -*- encoding: utf-8 -*-
 # vim: set et sw=4 ts=4 sts=4 ff=unix fenc=utf8:
 
-import sys
-import json
-import croniter
-import traceback
-import random
-import time
-import datetime
-import requests
 import asyncio
+import datetime
 import functools
+import json
+import os
+import random
+import sys
+import time
+import traceback
+
+import croniter
+import requests
+from tornado import gen
 
 import config
+from db import DB
 from libs import utils
-from tornado import gen
 from libs.fetcher import Fetcher
+
 from .log import Log
 
 logger_Funcs = Log('qiandao.Http.Funcs').getlogger()
 class pusher(object):
-    def __init__(self,db=None):
+    def __init__(self,db=DB(),sql_session=None):
         self.db = db
         self.fetcher = Fetcher()
+        self.sql_session = sql_session
     
-    def judge_res(self,res):
+    def judge_res(self,res:requests.Response):
         if (res.status_code == 200):
             r = "True"
         else:
@@ -42,10 +47,11 @@ class pusher(object):
         return r
     
     async def pusher(self, userid, pushsw, flg, title, content):
-        notice = self.db.user.get(userid, fields=('skey', 'barkurl', 'noticeflg', 'wxpusher', 'qywx_token', 'tg_token', 'dingding_token', 'diypusher'))
+        sql_session = self.sql_session
+        notice = await self.db.user.get(userid, fields=('skey', 'barkurl', 'noticeflg', 'wxpusher', 'qywx_token', 'tg_token', 'dingding_token', 'diypusher'), sql_session=sql_session)
 
         if (notice['noticeflg'] & flg != 0):
-            user = self.db.user.get(userid, fields=('id', 'email', 'email_verified', 'nickname'))
+            user = await self.db.user.get(userid, fields=('id', 'email', 'email_verified', 'nickname'), sql_session=sql_session)
             diypusher = notice['diypusher']
             if (diypusher != ''):diypusher = json.loads(diypusher)
             self.barklink =  notice['barkurl']
@@ -59,7 +65,7 @@ class pusher(object):
             pusher["tgpushersw"] = False if (notice['noticeflg'] & 0x400) == 0 else True
             pusher["dingdingpushersw"] = False if (notice['noticeflg'] & 0x800) == 0 else True
 
-            def nonepush(*args):
+            def nonepush(*args,**kwargs):
                 return 
 
             if (pushsw['pushen']):
@@ -73,13 +79,13 @@ class pusher(object):
                 send2dingding = self.send2dingding if (pusher["dingdingpushersw"]) else nonepush 
 
                 await gen.convert_yielded([send2bark(notice['barkurl'], title, content),
-                                           send2s(notice['skey'], title, content),
-                                           send2wxpusher( notice['wxpusher'], title+u"  "+content),
-                                           sendmail( user['email'], title, content),
-                                           cus_pusher_send( diypusher, title, content),
-                                           qywx_pusher_send( notice['qywx_token'], title, content),
-                                           send2tg( notice['tg_token'], title, content),
-                                           send2dingding(notice['dingding_token'], title, content)])
+                                        send2s(notice['skey'], title, content),
+                                        send2wxpusher( notice['wxpusher'], title+u"  "+content),
+                                        sendmail( user['email'], title, content, sql_session=sql_session),
+                                        cus_pusher_send( diypusher, title, content),
+                                        qywx_pusher_send( notice['qywx_token'], title, content),
+                                        send2tg( notice['tg_token'], title, content),
+                                        send2dingding(notice['dingding_token'], title, content)])
 
     async def send2bark(self, barklink, title, content):
         r = 'False'
@@ -242,8 +248,6 @@ class pusher(object):
 
             if (diypusher['mode'] == 'POST'):
                 postDatatmp = diypusher['postData'].replace('{log}', log).replace("{t}", t)
-                if (postDatatmp != ''):
-                    postDatatmp = json.loads(postDatatmp)
                 if headerstmp:
                     headerstmp.pop('content-type','')
                     headerstmp.pop('Content-Type','')
@@ -252,9 +256,17 @@ class pusher(object):
                     # headerstmp = [{'name': name, 'value': headerstmp[name]} for name in headerstmp]
                     # obj = {'request': {'method': 'POST', 'url': curltmp, 'headers': headerstmp, 'cookies': [], 'data':utils.urllib.parse.urlencode(postDatatmp)}, 'rule': {
                     #     'success_asserts': [], 'failed_asserts': [], 'extract_variables': []}, 'env': {'variables': {}, 'session': []}}
+                    if (postDatatmp != ''):
+                        try:
+                            postDatatmp = json.loads(postDatatmp)
+                        except:
+                            if isinstance(postDatatmp, str):
+                                postDatatmp = postDatatmp.encode('utf-8')
                     res = await asyncio.wait_for(asyncio.get_event_loop().run_in_executor(None, functools.partial(requests.post, curltmp, headers=headerstmp, data=postDatatmp, verify=False)),timeout=3.0)
                 else:
                     headerstmp['Content-Type'] = "application/json; charset=UTF-8"
+                    if (postDatatmp != ''):
+                        postDatatmp = json.loads(postDatatmp)
                     # headerstmp = [{'name': name, 'value': headerstmp[name]} for name in headerstmp]
                     # obj = {'request': {'method': 'POST', 'url': curltmp, 'headers': headerstmp, 'cookies': [], 'data':json.dumps(postDatatmp)}, 'rule': {
                     #     'success_asserts': [], 'failed_asserts': [], 'extract_variables': []}, 'env': {'variables': {}, 'session': []}}
@@ -277,24 +289,29 @@ class pusher(object):
         return r
 
     # 获取Access_Token
-    async def get_access_token(self,qywx):
-        access_url = 'https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid={id}&corpsecret={secret}'.format(id=qywx[u'企业ID'], secret=qywx[u'应用密钥'])
+    async def get_access_token(self, qywx:dict):
+        access_url = '{qywxProxy}cgi-bin/gettoken?corpid={id}&corpsecret={secret}'.format(qywxProxy=qywx[u'代理'], id=qywx[u'企业ID'], secret=qywx[u'应用密钥'])
         obj = {'request': {'method': 'GET', 'url': access_url, 'headers': [], 'cookies': []}, 'rule': {
                 'success_asserts': [], 'failed_asserts': [], 'extract_variables': []}, 'env': {'variables': {}, 'session': []}}
-        _,_,res = await gen.convert_yielded(self.fetcher.build_response(obj = obj))
+        _,_,res = await self.fetcher.build_response(obj = obj)
         get_access_token_res = json.loads(res.body)
         return get_access_token_res
 
     #上传临时素材,返回素材id
-    async def get_ShortTimeMedia(self,pic_url,access_token):
-        obj = {'request': {'method': 'GET', 'url': pic_url, 'headers': {}, 'cookies': []}, 'rule': {
-                   'success_asserts': [], 'failed_asserts': [], 'extract_variables': []}, 'env': {'variables': {}, 'session': []}}
-        _,_,res = await gen.convert_yielded(self.fetcher.build_response(obj = obj))
-        url='https://qyapi.weixin.qq.com/cgi-bin/media/upload?access_token={access_token}&type=image'.format(access_token = access_token)
-        r = await asyncio.get_event_loop().run_in_executor(None, functools.partial(requests.post, url, files={'image':res.body}, json=True, verify=False))
+    async def get_ShortTimeMedia(self,pic_url,access_token,qywxProxy):
+        if pic_url == config.push_pic:
+            with open(os.path.join(os.path.abspath(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),'web','static','img','push_pic.png'),'rb') as f:
+                res = f.read()
+        else:
+            obj = {'request': {'method': 'GET', 'url': pic_url, 'headers': {}, 'cookies': []}, 'rule': {
+                    'success_asserts': [], 'failed_asserts': [], 'extract_variables': []}, 'env': {'variables': {}, 'session': []}}
+            _,_,res = await self.fetcher.build_response(obj = obj)
+            res = res.body
+        url=f'{qywxProxy}cgi-bin/media/upload?access_token={access_token}&type=image'
+        r = await asyncio.get_event_loop().run_in_executor(None, functools.partial(requests.post, url, files={'image':res}, json=True, verify=False))
         return json.loads(r.text)['media_id']
 
-    async def qywx_pusher_send(self, qywx_token, t, log):
+    async def qywx_pusher_send(self, qywx_token, title:str, log:str):
         r = 'False'
         try:
             qywx = {}
@@ -304,15 +321,23 @@ class pusher(object):
                 qywx[u'应用ID'] = tmp[1]
                 qywx[u'应用密钥'] = tmp[2]
                 qywx[u'图片'] = tmp[3] if len(tmp) >= 4 else ''
+                qywx[u'代理'] = tmp[4] if len(tmp) >= 5 else 'https://qyapi.weixin.qq.com/'
             else:
                 raise Exception(u'企业微信获取AccessToken失败或参数不完整!')
 
+            if qywx[u'代理'][-1]!='/':
+                qywx[u'代理'] = qywx[u'代理'] + '/'
+            if qywx[u'代理'][:4] != 'http':
+                qywx[u'代理'] = u'https://{0}'.format(qywx[u'代理'])
             get_access_token_res = await self.get_access_token(qywx)
             pic_url = config.push_pic if qywx[u'图片'] == '' else qywx[u'图片']
             if (get_access_token_res.get('access_token','') != '' and get_access_token_res['errmsg'] == 'ok'):
                 access_token = get_access_token_res["access_token"]
-                media_id = await self.get_ShortTimeMedia(pic_url,access_token)
-                msgUrl = 'https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={0}'.format(access_token)
+                if utils.urlMatchWithLimit(pic_url) or utils.domainMatch(pic_url.split('/')[0]):
+                    media_id = await self.get_ShortTimeMedia(pic_url,access_token,qywx[u'代理'])
+                else:
+                    media_id = pic_url
+                msgUrl = '{0}cgi-bin/message/send?access_token={1}'.format(qywx[u'代理'], access_token)
                 postData = {"touser": "@all",
                             "toparty": "@all",
                             "totag": "@all",
@@ -321,7 +346,7 @@ class pusher(object):
                             "mpnews": {
                                 "articles": [
                                     {
-                                        "title": t,
+                                        "title": title,
                                         "digest": log.replace("\\r\\n", "\n"),
                                         "content": log.replace("\\r\\n", "<br>"),
                                         "author": "私有签到框架",
@@ -353,15 +378,15 @@ class pusher(object):
             return e
         return r
 
-    async def sendmail(self, email, title, content):
-        user = self.db.user.get(email=email, fields=('id', 'email', 'email_verified', 'nickname'))
+    async def sendmail(self, email, title, content:str, sql_session=None):
+        user = await self.db.user.get(email=email, fields=('id', 'email', 'email_verified', 'nickname'), sql_session=sql_session)
         if user['email'] and user['email_verified']:
             try:
                 content = content.replace('\\r\\n','\n')
-                await gen.convert_yielded(utils.send_mail(to = email, 
+                await utils.send_mail(to = email, 
                                 subject = u"在网站{0} {1}".format(config.domain, title),
                                 text = content,
-                                shark=True))
+                                shark=True)
             except Exception as e:
                 logger_Funcs.error('Send mail error: %r', e)
 

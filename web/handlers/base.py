@@ -4,13 +4,15 @@
 # Author: Binux<17175297.hk@gmail.com>
 #         http://binux.me
 # Created on 2012-12-15 16:16:38
+
 import jinja2
-import umsgpack
 import tornado.web
 import tornado.websocket
+import umsgpack
 from tornado.web import HTTPError
 
 import config
+from db import DB
 from libs import utils
 from libs.log import Log
 
@@ -20,6 +22,7 @@ __ALL__ = ['HTTPError', 'BaseHandler', 'BaseWebSocket', 'BaseUIModule', 'logger_
 
 class BaseHandler(tornado.web.RequestHandler):
     application_export = set(('db', 'fetcher'))
+    # db = DB()
     def __getattr__(self, key):
         if key in self.application_export:
             return getattr(self.application, key)

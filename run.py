@@ -1,17 +1,17 @@
-#! /usr/bin/env python
 # -*- coding: utf-8 -*-
 # vim:fenc=utf-8
 #
 # Copyright © 2016 Binux <roy@binux.me>
-from libs.log import Log
+import asyncio
+import platform
+import sys
+
+import requests
 import tornado.log
 
-import sys
-import platform
 import config
-
-from db import sqlite3_db_task_converter
-import requests
+from db import db_converter
+from libs.log import Log
 
 requests.packages.urllib3.disable_warnings()
 
@@ -21,7 +21,7 @@ if __name__ == "__main__":
         importlib.reload(sys)
     # init logging
     logger = Log().getlogger()
-    logger_Qiandao = Log('qiandao.run').getlogger()
+    logger_Qiandao = Log('qiandao.Run').getlogger()
 
     if config.debug:
         import logging
@@ -46,40 +46,19 @@ if __name__ == "__main__":
     if config.multiprocess and config.autoreload:
         config.autoreload = False
 
-    if config.db_type == 'sqlite3':
-        import sqlite3_db as db
-    else:
-        import db
-
-    class DB(object):
-        def __init__(self) -> None:
-            self.user = db.UserDB()
-            self.tpl = db.TPLDB()
-            self.task = db.TaskDB()
-            self.tasklog = db.TaskLogDB()
-            self.push_request = db.PRDB()
-            self.redis = db.RedisDB()
-            self.site = db.SiteDB()
-            self.pubtpl = db.PubTplDB()
-        def close(self):
-            self.user.close()
-            self.tpl.close()
-            self.task.close()
-            self.tasklog.close()
-            self.push_request.close()
-            self.redis.close()
-            self.site.close()
-            self.pubtpl.close()
-        
-    database = DB()
-
     try:
-        from web.app import Application
-        converter = sqlite3_db_task_converter.DBconverter()
-        converter.ConvertNewType(DB()) 
-        converter.db.close()
+        from db import DB
+        from db.basedb import engine
+        database = DB()
+        converter = db_converter.DBconverter()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        run = asyncio.ensure_future(converter.ConvertNewType(database) , loop=loop)
+        loop.run_until_complete(run)
 
         from tornado.httpserver import HTTPServer
+
+        from web.app import Application
         http_server = HTTPServer(Application(database), xheaders=True)
         http_server.bind(port, config.bind)
         if config.multiprocess:
@@ -87,16 +66,30 @@ if __name__ == "__main__":
         else:
             http_server.start()
 
-        from worker import MainWorker
         from tornado.ioloop import IOLoop, PeriodicCallback
-        worker = MainWorker(database)
-        PeriodicCallback(worker, config.check_task_loop).start()
-        worker()
+
+        from worker import BatchWorker, QueueWorker
+        io_loop = IOLoop.instance()
+        try:
+            if config.worker_method.upper() == 'QUEUE':
+                worker = QueueWorker(database)
+                io_loop.add_callback(worker)
+            elif config.worker_method.upper() == 'BATCH':
+                worker = BatchWorker(database)
+                PeriodicCallback(worker, config.check_task_loop).start()
+            else:
+                raise Exception('worker_method must be Queue or Batch, please check config!')
+        except Exception as e:
+            logger.exception('worker start error!')
+            raise KeyboardInterrupt()
 
         logger_Qiandao.info("Http Server started on %s:%s", config.bind, port)
-        IOLoop.instance().start()
+        io_loop.start()
     except KeyboardInterrupt :
         logger_Qiandao.info("Http Server is being manually interrupted... ")
-        database.close()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        run = asyncio.ensure_future(engine.dispose() , loop=loop)
+        loop.run_until_complete(run)
         logger_Qiandao.info("Http Server is ended. ")
 
